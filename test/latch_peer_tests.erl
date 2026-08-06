@@ -110,6 +110,63 @@ close_signal_test() ->
     latch_peer:close(Bob),
     ?assertEqual({error, closed}, latch_peer:recv(Alice)).
 
+%% The signed handshake records the remote peer's identity signing key.
+handshake_verifies_identities_test() ->
+    {Alice, Bob} = connect_pair(),
+    AId = latch_peer:identity(Alice),
+    BId = latch_peer:identity(Bob),
+    ?assert(is_binary(AId)),
+    ?assertEqual(32, byte_size(AId)),
+    ?assertEqual(32, byte_size(BId)),
+    ?assertNotEqual(AId, BId),
+    %% the verified session still exchanges messages
+    {ok, Bob2} = latch_peer:send(Bob, <<"verified">>),
+    {ok, _H, <<"verified">>, Alice2} = latch_peer:recv(Alice),
+    latch_peer:close(Alice2),
+    latch_peer:close(Bob2).
+
+%% A hello with a corrupted signature is rejected at handshake time.
+tampered_hello_rejected_test() ->
+    {Accept, Sock} = start_raw_handshake(),
+    Identity = latch_agreement:new_identity_signed(),
+    {EphPub, _} = latch_agreement:new_ephemeral(),
+    GoodSig = latch_agreement:sign_hello(Identity, EphPub),
+    <<Head:63/binary, Last:8>> = GoodSig,
+    BadSig = <<Head/binary, (Last bxor 16#01):8>>,
+    send_hello(Sock, Identity, EphPub, BadSig),
+    ?assertEqual({error, bad_signature}, await_accept(Accept)).
+
+%% A hello whose signature uses a different key than the one it claims is
+%% rejected. This simulates an attacker who signs with its own key.
+hello_signed_with_wrong_key_rejected_test() ->
+    {Accept, Sock} = start_raw_handshake(),
+    Claimed = latch_agreement:new_identity_signed(),
+    Signer = latch_agreement:new_identity_signed(),
+    {EphPub, _} = latch_agreement:new_ephemeral(),
+    Sig = latch_agreement:sign_hello(Signer, EphPub),
+    send_hello(Sock, Claimed, EphPub, Sig),
+    ?assertEqual({error, bad_signature}, await_accept(Accept)).
+
+%% A hello with the wrong frame length is a protocol error, not a crash.
+malformed_hello_rejected_test() ->
+    {Accept, Sock} = start_raw_handshake(),
+    ok = latch_wire:send(Sock, latch_wire:encode_frame(latch_wire:tag_hello(), <<"too short">>)),
+    ?assertEqual({error, protocol_error}, await_accept(Accept)).
+
+%% Fingerprints are available after the signed handshake.
+peer_fingerprint_after_handshake_test() ->
+    {Alice, Bob} = connect_pair(),
+    AFP = latch_peer:fingerprint(Alice),
+    BFP = latch_peer:fingerprint(Bob),
+    ?assert(is_list(AFP)),
+    ?assert(is_list(BFP)),
+    ?assertNotEqual(AFP, BFP),
+    ?assertEqual(ok, latch_peer:confirm_fingerprint(Alice, AFP)),
+    ?assertEqual(ok, latch_peer:confirm_fingerprint(Bob, BFP)),
+    ?assertEqual({error, mismatch}, latch_peer:confirm_fingerprint(Alice, BFP)),
+    latch_peer:close(Alice),
+    latch_peer:close(Bob).
+
 %% ---------------------------------------------------------------------------
 %% Helpers
 %% ---------------------------------------------------------------------------
@@ -160,3 +217,26 @@ decrypt_frames(Peer, Frames) ->
             P2
         end,
         Peer, Frames).
+
+%% Open a listener, start a responder accept, and dial it with a raw socket.
+start_raw_handshake() ->
+    {ok, LSock, Port} = latch_peer:listen(),
+    Me = self(),
+    spawn_link(fun() -> Me ! {accept_result, latch_peer:accept(LSock)} end),
+    {ok, Sock} = latch_wire:connect("127.0.0.1", Port),
+    {fun() -> gen_tcp:close(LSock) end, Sock}.
+
+await_accept(CloseLSock) ->
+    receive
+        {accept_result, Result} ->
+            CloseLSock(),
+            Result
+    after 5000 ->
+        CloseLSock(),
+        error(accept_timeout)
+    end.
+
+send_hello(Sock, Identity, EphPub, Sig) ->
+    #latch_identity{id = {IdPub, _}, sign = {SignPub, _}} = Identity,
+    Hello = latch_wire:encode_hello_signed(IdPub, SignPub, EphPub, Sig),
+    ok = latch_wire:send(Sock, latch_wire:encode_frame(latch_wire:tag_hello(), Hello)).

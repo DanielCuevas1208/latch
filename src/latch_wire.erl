@@ -9,6 +9,7 @@
 
 -export([tag_hello/0, tag_data/0, tag_bye/0]).
 -export([encode_frame/2, decode_frame/1, encode_hello/2, decode_hello/1]).
+-export([encode_hello_signed/4, decode_hello_signed/1]).
 -export([listen/1, accept/1, connect/2, send/2, recv/1]).
 
 -define(TAG_HELLO, 1).
@@ -46,6 +47,20 @@ encode_hello(IdentityPub, EphPub) ->
 -spec decode_hello(binary()) -> {binary(), binary()}.
 decode_hello(<<IdentityPub:32/binary, EphPub:32/binary>>) ->
     {IdentityPub, EphPub}.
+
+%% @doc Encode a signed handshake hello body.
+%%
+%% The body carries the identity key, the signing key, the ephemeral key, and
+%% a 64-byte Ed25519 signature over those three keys.
+-spec encode_hello_signed(binary(), binary(), binary(), binary()) -> binary().
+encode_hello_signed(IdentityPub, SignPub, EphPub, Signature) ->
+    <<IdentityPub/binary, SignPub/binary, EphPub/binary, Signature/binary>>.
+
+%% @doc Decode a signed handshake hello body.
+-spec decode_hello_signed(binary()) -> {binary(), binary(), binary(), binary()}.
+decode_hello_signed(<<IdentityPub:32/binary, SignPub:32/binary,
+                      EphPub:32/binary, Signature:64/binary>>) ->
+    {IdentityPub, SignPub, EphPub, Signature}.
 
 %% @doc Open a TCP listener on a port. Port 0 picks a free port.
 -spec listen(inet:port_number()) -> {ok, gen_tcp:socket()} | {error, term()}.

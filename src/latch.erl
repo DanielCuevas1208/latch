@@ -8,7 +8,7 @@
 
 -export([version/0, demo/1, info/0, main/1]).
 
--define(VERSION, "0.1.0").
+-define(VERSION, "0.3.0").
 
 %% @doc The Latch version.
 -spec version() -> string().

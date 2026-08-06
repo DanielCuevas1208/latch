@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-test:
@@ -16,7 +24,7 @@ jobs:
         rebar3: ["3.24.0"]
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Erlang and rebar3
         uses: erlef/setup-beam@v1
@@ -25,7 +33,7 @@ jobs:
           rebar3-version: ${{ matrix.rebar3 }}
 
       - name: Restore the dialyzer PLT cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: _build/default/*.plt
           key: plt-${{ matrix.otp }}-${{ hashFiles('rebar.config') }}

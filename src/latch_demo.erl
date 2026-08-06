@@ -114,6 +114,11 @@ pairwise_main(Alice, Bob, Count) ->
     Rounds = Count div Burst,
     Total = Rounds * Burst,
     io:format("  handshake complete. alice=initiator bob=responder~n"),
+    io:format("  identities verified with ed25519 signatures~n"),
+    show_identity("alice", Alice),
+    show_identity("bob", Bob),
+    io:format("~n  [0] fingerprint confirmation~n"),
+    fingerprint_confirmation(Alice, Bob),
     io:format("  each round sends ~p messages. the DH ratchet advances when a~n"
               "      peer sees a new key, so keys stay fresh~n", [Burst]),
     Roots0 = {latch_session:root_hash(latch_peer:session(Alice)),
@@ -198,6 +203,27 @@ show_pair(Name, Peer) ->
                maps:get(send_count, M), maps:get(recv_count, M),
                maps:get(prev_chain_length, M), maps:get(skipped_keys, M)]).
 
+show_identity(Name, Peer) ->
+    io:format("    ~-5s sees peer as ~s~n",
+              [Name, short_pub(latch_peer:identity(Peer))]),
+    io:format("          fingerprint  ~s~n", [latch_peer:fingerprint(Peer)]).
+
+fingerprint_confirmation(Alice, Bob) ->
+    AliceFP = latch_peer:fingerprint(Bob),
+    BobFP = latch_peer:fingerprint(Alice),
+    io:format("    alice confirms bob:   ~s~n",
+              [confirm_label(latch_peer:confirm_fingerprint(Alice, AliceFP))]),
+    io:format("    bob confirms alice:   ~s~n",
+              [confirm_label(latch_peer:confirm_fingerprint(Bob, BobFP))]),
+    io:format("    both peers matched the fingerprints they received~n").
+
+confirm_label(ok) ->
+    "matched";
+confirm_label({error, mismatch}) ->
+    "MISMATCH";
+confirm_label({error, no_identity}) ->
+    "no identity".
+
 %% ---------------------------------------------------------------------------
 %% Shuffled demo
 %% ---------------------------------------------------------------------------
@@ -272,35 +298,29 @@ relay_main(LSock, Parent) ->
     Parent ! relay_ready,
     %% data frames shuffle in both directions. only the burst sender matters
     %% here, so this is deterministic regardless of connect order.
-    spawn_link(fun() -> relay_forward(SA, SB, shuffle) end),
-    relay_forward(SB, SA, shuffle).
+    spawn_link(fun() -> relay_forward(SA, SB) end),
+    relay_forward(SB, SA).
 
-relay_forward(Src, Dst, Mode) ->
-    relay_loop(Src, Dst, Mode, []).
+relay_forward(Src, Dst) ->
+    relay_loop(Src, Dst, []).
 
-relay_loop(Src, Dst, Mode, Buffer) ->
+relay_loop(Src, Dst, Buffer) ->
     case latch_wire:recv(Src) of
         {ok, Frame} ->
             case latch_wire:decode_frame(Frame) of
                 {?TAG_DATA, _} ->
-                    case Mode of
-                        in_order ->
-                            ok = latch_wire:send(Dst, Frame),
-                            relay_loop(Src, Dst, Mode, []);
-                        shuffle ->
-                            Buffer2 = [Frame | Buffer],
-                            case length(Buffer2) >= ?SHUFFLE_BATCH of
-                                true ->
-                                    flush(Buffer2, Dst),
-                                    relay_loop(Src, Dst, Mode, []);
-                                false ->
-                                    relay_loop(Src, Dst, Mode, Buffer2)
-                            end
+                    Buffer2 = [Frame | Buffer],
+                    case length(Buffer2) >= ?SHUFFLE_BATCH of
+                        true ->
+                            flush(Buffer2, Dst),
+                            relay_loop(Src, Dst, []);
+                        false ->
+                            relay_loop(Src, Dst, Buffer2)
                     end;
                 {_, _} ->
                     %% handshake and control frames stay in order
                     ok = latch_wire:send(Dst, Frame),
-                    relay_loop(Src, Dst, Mode, [])
+                    relay_loop(Src, Dst, [])
             end;
         {error, closed} ->
             flush(Buffer, Dst),

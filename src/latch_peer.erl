@@ -6,6 +6,11 @@
 %%
 %% The dialing peer is the session `initiator'. The accepting peer is the
 %% `responder'. Roles are fixed at connect time.
+%%
+%% The handshake is signed. Each peer proves its identity signing key before
+%% the session starts. A peer with an invalid signature is rejected with
+%% `{error, bad_signature}'. Call {@link identity/1.} to read the verified
+%% signing key of the remote peer.
 -module(latch_peer).
 
 -include("latch.hrl").
@@ -16,7 +21,7 @@
 
 -export([listen/0, accept/1, connect/2, from_socket/2]).
 -export([send/2, recv/1, recv_frame/1, decrypt/3, close/1]).
--export([session/1, identity/1, hand_over/2]).
+-export([session/1, identity/1, fingerprint/1, confirm_fingerprint/2, hand_over/2]).
 
 -export_type([peer/0]).
 
@@ -63,20 +68,21 @@ connect(Host, Port) ->
 %% @doc Wrap an existing connected socket and run the handshake for Role.
 -spec from_socket(gen_tcp:socket(), initiator | responder) -> {ok, peer()} | {error, term()}.
 from_socket(Sock, Role) ->
-    {IdPub, IdPriv} = latch_agreement:new_identity(),
-    {EphPub, EphPriv} = latch_agreement:new_ephemeral(),
-    Hello = latch_wire:encode_hello(IdPub, EphPub),
-    Frame = latch_wire:encode_frame(latch_wire:tag_hello(), Hello),
+    Identity = latch_agreement:new_identity_signed(),
+    EphKey = latch_agreement:new_ephemeral(),
     case Role of
         initiator ->
-            case latch_wire:send(Sock, Frame) of
+            Hello = signed_hello(Identity, EphKey),
+            case latch_wire:send(
+                   Sock,
+                   latch_wire:encode_frame(latch_wire:tag_hello(), Hello)) of
                 ok ->
-                    finish_handshake(Sock, Role, {IdPub, IdPriv}, {EphPub, EphPriv});
+                    finish_handshake(Sock, Role, Identity, EphKey);
                 Error ->
                     Error
             end;
         responder ->
-            finish_handshake(Sock, Role, {IdPub, IdPriv}, {EphPub, EphPriv})
+            finish_handshake(Sock, Role, Identity, EphKey)
     end.
 
 %% @doc Encrypt and send one message. Returns {ok, Peer2}.
@@ -154,40 +160,83 @@ close(#latch_peer{sock = Sock}) ->
 session(#latch_peer{session = Session}) ->
     Session.
 
-%% @doc The peer's identity public key.
+%% @doc The remote peer's verified identity signing key.
 -spec identity(peer()) -> binary() | undefined.
 identity(#latch_peer{identity = Identity}) ->
     Identity.
+
+%% @doc The remote peer's signing-key fingerprint.
+%%
+%% Returns a grouped hex string. Use it to confirm the peer out of band.
+-spec fingerprint(peer()) -> string() | undefined.
+fingerprint(#latch_peer{identity = undefined}) ->
+    undefined;
+fingerprint(#latch_peer{identity = SignPub}) ->
+    latch_agreement:fingerprint(SignPub).
+
+%% @doc Confirm the remote peer against an expected fingerprint.
+%%
+%% The expected value may use any case and spacing. Returns `ok' on a match.
+%% Returns `{error, mismatch}' when the fingerprint differs.
+-spec confirm_fingerprint(peer(), string() | binary()) -> ok | {error, mismatch | no_identity}.
+confirm_fingerprint(#latch_peer{identity = undefined}, _Expected) ->
+    {error, no_identity};
+confirm_fingerprint(#latch_peer{identity = SignPub}, Expected) ->
+    case latch_agreement:fingerprints_match(
+           latch_agreement:fingerprint(SignPub), Expected) of
+        true -> ok;
+        false -> {error, mismatch}
+    end.
 
 %% ---------------------------------------------------------------------------
 %% Internal
 %% ---------------------------------------------------------------------------
 
-finish_handshake(Sock, Role, IdKey, EphKey) ->
+signed_hello(Identity, EphKey) ->
+    #latch_identity{id = {IdPub, _IdPriv},
+                    sign = {SignPub, _SignPriv}} = Identity,
+    {EphPub, _EphPriv} = EphKey,
+    latch_wire:encode_hello_signed(
+      IdPub, SignPub, EphPub,
+      latch_agreement:sign_hello(Identity, EphPub)).
+
+finish_handshake(Sock, Role, Identity, EphKey) ->
     case latch_wire:recv(Sock) of
         {ok, Frame} ->
             case latch_wire:decode_frame(Frame) of
                 {?TAG_HELLO, Hello} ->
-                    {PeerIdPub, PeerEphPub} = latch_wire:decode_hello(Hello),
-                    case Role of
-                        responder ->
-                            {IdPub, _IdPriv} = IdKey,
-                            {EphPub, _EphPriv} = EphKey,
-                            ok = latch_wire:send(
-                                   Sock,
-                                   latch_wire:encode_frame(
-                                       latch_wire:tag_hello(),
-                                       latch_wire:encode_hello(IdPub, EphPub)));
-                        initiator ->
-                            ok
-                    end,
-                    Session = latch_agreement:session(Role, {IdKey, EphKey},
-                                                      {PeerIdPub, PeerEphPub}),
-                    {ok, #latch_peer{sock = Sock, session = Session, role = Role,
-                                     identity = PeerIdPub}};
+                    verify_hello_and_finish(Sock, Role, Identity, EphKey, Hello);
                 _ ->
                     {error, protocol_error}
             end;
         Error ->
             Error
     end.
+
+verify_hello_and_finish(Sock, Role, Identity, EphKey, Hello) ->
+    try latch_wire:decode_hello_signed(Hello) of
+        {PeerIdPub, PeerSignPub, PeerEphPub, Sig} ->
+            case latch_agreement:verify_hello(PeerIdPub, PeerSignPub, PeerEphPub, Sig) of
+                false ->
+                    {error, bad_signature};
+                true ->
+                    send_reply(Role, Sock, Identity, EphKey),
+                    Session = latch_agreement:session(
+                                Role,
+                                {Identity#latch_identity.id, EphKey},
+                                {PeerIdPub, PeerEphPub}),
+                    {ok, #latch_peer{sock = Sock, session = Session, role = Role,
+                                     identity = PeerSignPub}}
+            end
+    catch
+        error:function_clause ->
+            {error, protocol_error}
+    end.
+
+send_reply(responder, Sock, Identity, EphKey) ->
+    ok = latch_wire:send(
+           Sock,
+           latch_wire:encode_frame(latch_wire:tag_hello(),
+                                   signed_hello(Identity, EphKey)));
+send_reply(initiator, _Sock, _Identity, _EphKey) ->
+    ok.
