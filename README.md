@@ -14,15 +14,37 @@ The double ratchet advances a fresh key for every message. Messages use
 AES-256-GCM authenticated encryption. The header of each message
 authenticates the ciphertext.
 
-This release adds two capabilities:
+This release adds fingerprint confirmation. Each peer can read a grouped hex
+fingerprint of the remote signing key. Peers confirm the fingerprint out of
+band before they trust the session. The release keeps three earlier capabilities:
 
+* A signed handshake that authenticates identities.
 * Out-of-order message handling with skipped keys.
 * Group messages with a shared sender key.
+
+## Security properties
+
+The handshake authenticates both peers. Each peer signs its ephemeral key
+with an Ed25519 identity key. The other peer verifies the signature and
+rejects a bad key.
+
+Forward secrecy holds. After a DH ratchet, old message keys no longer exist.
+A captured old ciphertext fails authentication.
+
+Authenticated encryption detects tampering. A changed ciphertext or header
+fails decryption.
+
+Authentication is self-managed. There is no external trust root. Compare
+fingerprints out of band to prevent impersonation.
 
 ## How it works
 
 Each peer holds an identity key and an ephemeral key. Peers exchange the
 public halves over the transport. Both peers derive the same shared secret.
+
+The handshake hello carries the identity key, the signing key, the ephemeral
+key, and a signature over those three keys. A peer verifies the signature
+before it derives a session.
 
 The double ratchet has two parts:
 
@@ -41,17 +63,18 @@ Group messaging uses a sender key. Each member owns one sending chain. The
 other members hold receiver sessions for that chain. Every message carries an
 Ed25519 signature.
 
-## Security properties
+## Fingerprint confirmation
 
-Forward secrecy holds. After a DH ratchet, old message keys no longer exist.
-A captured old ciphertext fails authentication.
+After the handshake, call `latch_peer:fingerprint/1` to read the remote peer's
+signing-key fingerprint. The value is a SHA-256 digest shown as 16 groups of
+four hex digits.
 
-Authenticated encryption detects tampering. A changed ciphertext or header
-fails decryption.
+Compare the fingerprint out of band. Call `latch_peer:confirm_fingerprint/2`
+with the expected value. The function accepts any case and spacing. It returns
+`ok` on a match or `{error, mismatch}` when the value differs.
 
-The handshake is not signed in this release. An active attacker on an
-untrusted network can impersonate a peer. Use this release on a trusted
-transport.
+You can also format a raw signing key with `latch_agreement:fingerprint/1`.
+Use `latch_agreement:fingerprints_match/2` to compare two strings.
 
 ## Repository layout
 
@@ -60,7 +83,7 @@ src/                library modules
   latch.erl           top-level API and demo entry point
   latch_kdf.erl       HKDF and ratchet key derivation
   latch_crypto.erl    AES-256-GCM wrapper
-  latch_agreement.erl key agreement and session setup
+  latch_agreement.erl key agreement, identity signing, session setup
   latch_session.erl   the double ratchet session
   latch_sender_key.erl group messaging with a sender key
   latch_wire.erl      socket framing
@@ -92,9 +115,9 @@ Run this command from the repository root:
 rebar3 eunit
 ```
 
-The suite runs 66 tests. It covers key derivation, authenticated encryption,
-the ratchet, out-of-order delivery, forward secrecy, group messaging, and the
-socket transport.
+The suite runs 82 tests. It covers key derivation, authenticated encryption,
+the signed handshake, fingerprint confirmation, the ratchet, out-of-order
+delivery, forward secrecy, group messaging, and the socket transport.
 
 Run the static analysis:
 
@@ -132,6 +155,16 @@ Two peers over a loopback TCP socket
 
   bob listens on 127.0.0.1:60004
   handshake complete. alice=initiator bob=responder
+  identities verified with ed25519 signatures
+    alice sees peer as 7DBBE137
+          fingerprint  A1B2 C3D4 E5F6 7081 92A3 B4C5 D6E7 F809 ...
+    bob   sees peer as 0DC10A4E
+          fingerprint  1F2E 3D4C 5B6A 7988 8776 6554 4332 2110 ...
+
+  [0] fingerprint confirmation
+    alice confirms bob:   matched
+    bob confirms alice:   matched
+    both peers matched the fingerprints they received
 
   [1] conversation with 8 messages each way
     alice -> : alice message 01 [n=0]
@@ -157,8 +190,9 @@ Two peers over a loopback TCP socket
 ```
 
 The `dh` value changes with each ratchet. The `pn` value reports the previous
-chain length. The forward secrecy check shows that the first message key no
-longer exists.
+chain length. The fingerprint is the remote peer's signing key. Read it aloud
+to confirm the peer out of band. The forward secrecy check shows that the
+first message key no longer exists.
 
 ### Out-of-order demo
 
@@ -223,13 +257,15 @@ Print the runtime environment:
 
 ## Test status
 
-* EUnit: 66 tests, 0 failures.
+* EUnit: 82 tests, 0 failures.
 * Dialyzer: no warnings.
 * Demos: all three run locally on loopback TCP.
 
 ## Limitations
 
-* The handshake is not signed. Use a trusted transport.
+* Authentication is self-managed. There is no external trust root.
+* Fingerprint confirmation needs a separate channel. The TCP socket does not
+  prove the peer alone.
 * The skip window covers one sending chain. Late messages from a superseded
   chain are dropped.
 * Sessions live in memory. There is no persistence.
@@ -237,7 +273,13 @@ Print the runtime environment:
 
 ## Roadmap
 
+Complete:
+
 * Sign the handshake and authenticate identities.
+* Add a fingerprint confirmation flow for peer keys.
+
+Remaining:
+
 * Add session persistence and resumption.
 * Add test vectors from the Double Ratchet reference.
 * Add a supervised peer with auto-reconnect.

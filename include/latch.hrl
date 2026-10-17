@@ -25,6 +25,16 @@
 
 -type latch_sheader() :: #latch_sheader{}.
 
+%% Long-term identity of a Latch peer.
+%% id   - X25519 identity pair {Pub, Priv}, used for key agreement
+%% sign - Ed25519 signing pair {Pub, Priv}, used to authenticate the handshake
+-record(latch_identity, {
+    id :: {binary(), binary()},
+    sign :: {binary(), binary()}
+}).
+
+-type latch_identity() :: #latch_identity{}.
+
 %% State of one double-ratchet session.
 -record(latch_session, {
     role :: initiator | responder,

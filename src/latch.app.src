@@ -1,10 +1,10 @@
 {application, latch, [
     {description, "Ratchet-based secure messaging for two peers"},
-    {vsn, "0.1.0"},
+    {vsn, "0.3.0"},
     {registered, [latch_sup]},
     {mod, {latch_app, []}},
     {applications, [kernel, stdlib, crypto]},
     {env, []},
-    {licenses, ["Apache-2.0"]},
+    {licenses, ["MIT"]},
     {links, []}
 ]}.
